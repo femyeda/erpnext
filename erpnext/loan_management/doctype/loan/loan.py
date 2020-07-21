@@ -13,12 +13,11 @@ from erpnext.controllers.accounts_controller import AccountsController
 class Loan(AccountsController):
 	def validate(self):
 		self.set_loan_amount()
-
+		self.validate_loan_amount()
 		self.set_missing_fields()
 		self.validate_accounts()
-		self.validate_loan_security_pledge()
-		self.validate_loan_amount()
 		self.check_sanctioned_amount_limit()
+		self.validate_repay_from_salary()
 
 		if self.is_term_loan:
 			validate_repayment_method(self.repayment_method, self.loan_amount, self.monthly_repayment_amount,
@@ -55,27 +54,16 @@ class Loan(AccountsController):
 		if self.repayment_method == "Repay Over Number of Periods":
 			self.monthly_repayment_amount = get_monthly_repayment_amount(self.repayment_method, self.loan_amount, self.rate_of_interest, self.repayment_periods)
 
-	def validate_loan_security_pledge(self):
-
-		if self.is_secured_loan and not self.loan_security_pledge:
-			frappe.throw(_("Loan Security Pledge is mandatory for secured loan"))
-
-		if self.loan_security_pledge:
-			loan_security_details = frappe.db.get_value("Loan Security Pledge", self.loan_security_pledge,
-					['loan', 'company'], as_dict=1)
-
-			if loan_security_details.loan:
-				frappe.throw(_("Loan Security Pledge already pledged against loan {0}").format(loan_security_details.loan))
-
-			if loan_security_details.company != self.company:
-				frappe.throw(_("Loan Security Pledge Company and Loan Company must be same"))
-
 	def check_sanctioned_amount_limit(self):
 		total_loan_amount = get_total_loan_amount(self.applicant_type, self.applicant, self.company)
 		sanctioned_amount_limit = get_sanctioned_amount_limit(self.applicant_type, self.applicant, self.company)
 
 		if sanctioned_amount_limit and flt(self.loan_amount) + flt(total_loan_amount) > flt(sanctioned_amount_limit):
 			frappe.throw(_("Sanctioned Amount limit crossed for {0} {1}").format(self.applicant_type, frappe.bold(self.applicant)))
+
+	def validate_repay_from_salary(self):
+		if not self.is_term_loan and self.repay_from_salary:
+			frappe.throw(_("Repay From Salary can be selected only for term loans"))
 
 	def make_repayment_schedule(self):
 
@@ -124,22 +112,29 @@ class Loan(AccountsController):
 			self.total_payment = self.loan_amount
 
 	def set_loan_amount(self):
+		if self.loan_application and not self.loan_amount:
+			self.loan_amount = frappe.db.get_value('Loan Application', self.loan_application, 'loan_amount')
 
-		if not self.loan_amount and self.is_secured_loan and self.loan_security_pledge:
-			self.loan_amount = self.maximum_loan_value
 
 	def validate_loan_amount(self):
-		if self.is_secured_loan and self.loan_amount > self.maximum_loan_value:
-			msg = _("Loan amount cannot be greater than {0}").format(self.maximum_loan_value)
+		if self.maximum_loan_amount and self.loan_amount > self.maximum_loan_amount:
+			msg = _("Loan amount cannot be greater than {0}").format(self.maximum_loan_amount)
 			frappe.throw(msg)
 
 		if not self.loan_amount:
 			frappe.throw(_("Loan amount is mandatory"))
 
 	def link_loan_security_pledge(self):
-		frappe.db.sql("""UPDATE `tabLoan Security Pledge` SET
-			loan = %s, status = 'Pledged', pledge_time = %s
-			where name = %s """, (self.name, now_datetime(), self.loan_security_pledge))
+		if self.is_secured_loan:
+			loan_security_pledge = frappe.db.get_value('Loan Security Pledge', {'loan_application': self.loan_application},
+				'name')
+
+			if loan_security_pledge:
+				frappe.db.set_value('Loan Security Pledge', loan_security_pledge, {
+					'loan': self.name,
+					'status': 'Pledged',
+					'pledge_time': now_datetime()
+				})
 
 	def unlink_loan_security_pledge(self):
 		frappe.db.sql("""UPDATE `tabLoan Security Pledge` SET
@@ -198,7 +193,7 @@ def close_loan(loan, total_amount_paid):
 	frappe.db.set_value("Loan", loan, "status", "Closed")
 
 @frappe.whitelist()
-def make_loan_disbursement(loan, company, applicant_type, applicant, disbursed_amount=0, as_dict=0):
+def make_loan_disbursement(loan, company, applicant_type, applicant, pending_amount=0, as_dict=0):
 	disbursement_entry = frappe.new_doc("Loan Disbursement")
 	disbursement_entry.against_loan = loan
 	disbursement_entry.applicant_type = applicant_type
@@ -206,8 +201,7 @@ def make_loan_disbursement(loan, company, applicant_type, applicant, disbursed_a
 	disbursement_entry.company = company
 	disbursement_entry.disbursement_date = nowdate()
 
-	if disbursed_amount:
-		disbursement_entry.disbursed_amount = disbursed_amount
+	disbursement_entry.disbursed_amount = pending_amount
 	if as_dict:
 		return disbursement_entry.as_dict()
 	else:
@@ -229,10 +223,12 @@ def make_repayment_entry(loan, applicant_type, applicant, loan_type, company, as
 		return repayment_entry
 
 @frappe.whitelist()
-def create_loan_security_unpledge(loan, applicant_type, applicant, company):
+def create_loan_security_unpledge(loan, applicant_type, applicant, company, as_dict=1):
 	loan_security_pledge_details = frappe.db.sql("""
-		SELECT p.parent, p.loan_security, p.qty as qty FROM `tabLoan Security Pledge` lsp , `tabPledge` p
+		SELECT p.loan_security, sum(p.qty) as qty
+		FROM `tabLoan Security Pledge` lsp , `tabPledge` p
 		WHERE p.parent = lsp.name AND lsp.loan = %s AND lsp.docstatus = 1
+		GROUP BY p.loan_security
 	""",(loan), as_dict=1)
 
 	unpledge_request = frappe.new_doc("Loan Security Unpledge")
@@ -244,11 +240,13 @@ def create_loan_security_unpledge(loan, applicant_type, applicant, company):
 	for loan_security in loan_security_pledge_details:
 		unpledge_request.append('securities', {
 			"loan_security": loan_security.loan_security,
-			"qty": loan_security.qty,
-			"against_pledge": loan_security.parent
+			"qty": loan_security.qty
 		})
 
-	return unpledge_request.as_dict()
+	if as_dict:
+		return unpledge_request.as_dict()
+	else:
+		return unpledge_request
 
 
 

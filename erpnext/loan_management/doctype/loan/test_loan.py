@@ -9,11 +9,14 @@ import unittest
 from frappe.utils import (nowdate, add_days, getdate, now_datetime, add_to_date, get_datetime,
 	add_months, get_first_day, get_last_day, flt, date_diff)
 from erpnext.selling.doctype.customer.test_customer import get_customer_dict
-from erpnext.hr.doctype.salary_structure.test_salary_structure import make_employee
-from erpnext.loan_management.doctype.process_loan_interest_accrual.process_loan_interest_accrual import process_loan_interest_accrual
-from erpnext.loan_management.doctype.loan_interest_accrual.loan_interest_accrual import (make_accrual_interest_entry_for_term_loans, days_in_year)
-
-from erpnext.loan_management.doctype.loan_security_shortfall.loan_security_shortfall import check_for_ltv_shortfall
+from erpnext.payroll.doctype.salary_structure.test_salary_structure import make_employee
+from erpnext.loan_management.doctype.process_loan_interest_accrual.process_loan_interest_accrual import (process_loan_interest_accrual_for_demand_loans,
+	process_loan_interest_accrual_for_term_loans)
+from erpnext.loan_management.doctype.loan_interest_accrual.loan_interest_accrual import days_in_year
+from erpnext.loan_management.doctype.process_loan_security_shortfall.process_loan_security_shortfall import create_process_loan_security_shortfall
+from erpnext.loan_management.doctype.loan.loan import create_loan_security_unpledge
+from erpnext.loan_management.doctype.loan_security_unpledge.loan_security_unpledge import get_pledged_security_qty
+from erpnext.loan_management.doctype.loan_application.loan_application import create_pledge
 
 class TestLoan(unittest.TestCase):
 	def setUp(self):
@@ -70,31 +73,31 @@ class TestLoan(unittest.TestCase):
 		self.assertEquals(loan.total_payment, 302712)
 
 	def test_loan_with_security(self):
-		pledges = []
-		pledges.append({
+
+		pledge = [{
 			"loan_security": "Test Security 1",
 			"qty": 4000.00,
-			"haircut": 50,
-			"loan_security_price": 500.00
-		})
+		}]
 
-		loan_security_pledge = create_loan_security_pledge(self.applicant2, pledges)
+		loan_application = create_loan_application('_Test Company', self.applicant2,
+			'Stock Loan', pledge, "Repay Over Number of Periods", 12)
+		create_pledge(loan_application)
 
-		loan = create_loan_with_security(self.applicant2, "Stock Loan", "Repay Over Number of Periods", 12, loan_security_pledge.name)
-
+		loan = create_loan_with_security(self.applicant2, "Stock Loan", "Repay Over Number of Periods",
+			12, loan_application)
 		self.assertEquals(loan.loan_amount, 1000000)
 
 	def test_loan_disbursement(self):
-		pledges = []
-		pledges.append({
+		pledge = [{
 			"loan_security": "Test Security 1",
-			"qty": 4000.00,
-			"haircut": 50
-		})
+			"qty": 4000.00
+		}]
 
-		loan_security_pledge = create_loan_security_pledge(self.applicant2, pledges)
+		loan_application = create_loan_application('_Test Company', self.applicant2, 'Stock Loan', pledge, "Repay Over Number of Periods", 12)
 
-		loan = create_loan_with_security(self.applicant2, "Stock Loan", "Repay Over Number of Periods", 12, loan_security_pledge.name)
+		create_pledge(loan_application)
+
+		loan = create_loan_with_security(self.applicant2, "Stock Loan", "Repay Over Number of Periods", 12, loan_application)
 		self.assertEquals(loan.loan_amount, 1000000)
 
 		loan.submit()
@@ -119,18 +122,15 @@ class TestLoan(unittest.TestCase):
 		self.assertTrue(gl_entries2)
 
 	def test_regular_loan_repayment(self):
-		pledges = []
-		pledges.append({
+		pledge = [{
 			"loan_security": "Test Security 1",
-			"qty": 4000.00,
-			"haircut": 50
-		})
+			"qty": 4000.00
+		}]
 
-		loan_security_pledge = create_loan_security_pledge(self.applicant2, pledges)
+		loan_application = create_loan_application('_Test Company', self.applicant2, 'Demand Loan', pledge)
+		create_pledge(loan_application)
 
-		loan = create_demand_loan(self.applicant2, "Demand Loan", loan_security_pledge.name,
-			posting_date=get_first_day(nowdate()))
-
+		loan = create_demand_loan(self.applicant2, "Demand Loan", loan_application, posting_date=get_first_day(nowdate()))
 		loan.submit()
 
 		self.assertEquals(loan.loan_amount, 1000000)
@@ -145,29 +145,34 @@ class TestLoan(unittest.TestCase):
 
 		make_loan_disbursement_entry(loan.name, loan.loan_amount, disbursement_date=first_date)
 
-		process_loan_interest_accrual(posting_date = last_date)
+		process_loan_interest_accrual_for_demand_loans(posting_date = last_date)
 
 		repayment_entry = create_repayment_entry(loan.name, self.applicant2, add_days(last_date, 10), "Regular Payment", 111118.68)
 		repayment_entry.save()
-
-		penalty_amount = (accrued_interest_amount * 5 * 25) / (100 * days_in_year(get_datetime(first_date).year))
-
-		self.assertEquals(flt(repayment_entry.interest_payable, 2), flt(accrued_interest_amount, 2))
-		self.assertEquals(flt(repayment_entry.penalty_amount, 2), flt(penalty_amount, 2))
-
 		repayment_entry.submit()
 
-	def test_loan_closure_repayment(self):
-		pledges = []
-		pledges.append({
-			"loan_security": "Test Security 1",
-			"qty": 4000.00,
-			"haircut": 50
-		})
+		penalty_amount = (accrued_interest_amount * 4 * 25) / (100 * days_in_year(get_datetime(first_date).year))
+		self.assertEquals(flt(repayment_entry.penalty_amount, 2), flt(penalty_amount, 2))
 
-		loan_security_pledge = create_loan_security_pledge(self.applicant2, pledges)
-		loan = create_demand_loan(self.applicant2, "Demand Loan", loan_security_pledge.name,
-			posting_date=get_first_day(nowdate()))
+		amounts = frappe.db.get_value('Loan Interest Accrual', {'loan': loan.name}, ['paid_interest_amount',
+			'paid_principal_amount'])
+
+		loan.load_from_db()
+
+		self.assertEquals(amounts[0], repayment_entry.interest_payable)
+		self.assertEquals(flt(loan.total_principal_paid, 2), flt(repayment_entry.amount_paid -
+			 penalty_amount - amounts[0], 2))
+
+	def test_loan_closure_repayment(self):
+		pledge = [{
+			"loan_security": "Test Security 1",
+			"qty": 4000.00
+		}]
+
+		loan_application = create_loan_application('_Test Company', self.applicant2, 'Demand Loan', pledge)
+		create_pledge(loan_application)
+
+		loan = create_demand_loan(self.applicant2, "Demand Loan", loan_application, posting_date=get_first_day(nowdate()))
 		loan.submit()
 
 		self.assertEquals(loan.loan_amount, 1000000)
@@ -186,70 +191,100 @@ class TestLoan(unittest.TestCase):
 			/ (days_in_year(get_datetime(first_date).year) * 100)
 
 		make_loan_disbursement_entry(loan.name, loan.loan_amount, disbursement_date=first_date)
-		process_loan_interest_accrual(posting_date = last_date)
+		process_loan_interest_accrual_for_demand_loans(posting_date = last_date)
 
 		repayment_entry = create_repayment_entry(loan.name, self.applicant2, add_days(last_date, 5),
-			"Loan Closure", 13315.0681)
-		repayment_entry.save()
+			"Loan Closure", flt(loan.loan_amount + accrued_interest_amount))
+		repayment_entry.submit()
 
-		repayment_entry.amount_paid = repayment_entry.payable_amount
+		amounts = frappe.db.get_value('Loan Interest Accrual', {'loan': loan.name}, ['paid_interest_amount',
+			'paid_principal_amount'])
 
-		self.assertEquals(flt(repayment_entry.interest_payable, 3), flt(accrued_interest_amount, 3))
+		unaccrued_interest_amount =  (loan.loan_amount * loan.rate_of_interest * 6) \
+			/ (days_in_year(get_datetime(first_date).year) * 100)
+
+		self.assertEquals(flt(amounts[0] + unaccrued_interest_amount, 3),
+			flt(accrued_interest_amount, 3))
 		self.assertEquals(flt(repayment_entry.penalty_amount, 5), 0)
 
-		repayment_entry.submit()
 		loan.load_from_db()
 		self.assertEquals(loan.status, "Loan Closure Requested")
 
 	def test_loan_repayment_for_term_loan(self):
-		pledges = []
-		pledges.append({
+		pledges = [{
 			"loan_security": "Test Security 2",
-			"qty": 4000.00,
-			"haircut": 50
-		})
-
-		pledges.append({
+			"qty": 4000.00
+		},
+		{
 			"loan_security": "Test Security 1",
-			"qty": 2000.00,
-			"haircut": 50
-		})
+			"qty": 2000.00
+		}]
 
-		loan_security_pledge = create_loan_security_pledge(self.applicant2, pledges)
+		loan_application = create_loan_application('_Test Company', self.applicant2, 'Stock Loan', pledges,
+			"Repay Over Number of Periods", 12)
+		create_pledge(loan_application)
 
-		loan = create_loan_with_security(self.applicant2, "Stock Loan", "Repay Over Number of Periods", 12,
-			loan_security_pledge.name, posting_date=add_months(nowdate(), -1))
+		loan = create_loan_with_security(self.applicant2, "Stock Loan", "Repay Over Number of Periods", 12, loan_application,
+			posting_date=add_months(nowdate(), -1))
 
 		loan.submit()
 
 		make_loan_disbursement_entry(loan.name, loan.loan_amount, disbursement_date=add_months(nowdate(), -1))
 
-		make_accrual_interest_entry_for_term_loans(posting_date=nowdate())
+		process_loan_interest_accrual_for_term_loans(posting_date=nowdate())
 
-		repayment_entry = create_repayment_entry(loan.name, self.applicant2, add_days(get_last_day(nowdate()), 5),
-			"Regular Payment", 89768.7534247)
+		repayment_entry = create_repayment_entry(loan.name, self.applicant2, add_days(nowdate(), 5),
+			"Regular Payment", 89768.75)
 
-		repayment_entry.save()
 		repayment_entry.submit()
 
-		repayment_entry.load_from_db()
+		amounts = frappe.db.get_value('Loan Interest Accrual', {'loan': loan.name}, ['paid_interest_amount',
+			'paid_principal_amount'])
 
-		self.assertEquals(repayment_entry.interest_payable, 11250.00)
-		self.assertEquals(repayment_entry.payable_principal_amount, 78303.00)
+		self.assertEquals(amounts[0], 11250.00)
+		self.assertEquals(amounts[1], 78303.00)
 
-	def test_partial_loan_repayment(self):
-		pledges = []
-		pledges.append({
+	def test_security_shortfall(self):
+		pledges = [{
+			"loan_security": "Test Security 2",
+			"qty": 8000.00,
+			"haircut": 50,
+		}]
+
+		loan_application = create_loan_application('_Test Company', self.applicant2,
+			'Stock Loan', pledges, "Repay Over Number of Periods", 12)
+
+		create_pledge(loan_application)
+
+		loan = create_loan_with_security(self.applicant2, "Stock Loan", "Repay Over Number of Periods", 12, loan_application)
+		loan.submit()
+
+		make_loan_disbursement_entry(loan.name, loan.loan_amount)
+
+		frappe.db.sql("""UPDATE `tabLoan Security Price` SET loan_security_price = 100
+			where loan_security='Test Security 2'""")
+
+		create_process_loan_security_shortfall()
+		loan_security_shortfall = frappe.get_doc("Loan Security Shortfall", {"loan": loan.name})
+		self.assertTrue(loan_security_shortfall)
+
+		self.assertEquals(loan_security_shortfall.loan_amount, 1000000.00)
+		self.assertEquals(loan_security_shortfall.security_value, 400000.00)
+		self.assertEquals(loan_security_shortfall.shortfall_amount, 600000.00)
+
+		frappe.db.sql(""" UPDATE `tabLoan Security Price` SET loan_security_price = 250
+			where loan_security='Test Security 2'""")
+
+	def test_loan_security_unpledge(self):
+		pledge = [{
 			"loan_security": "Test Security 1",
-			"qty": 4000.00,
-			"haircut": 50
-		})
+			"qty": 4000.00
+		}]
 
-		loan_security_pledge = create_loan_security_pledge(self.applicant2, pledges)
+		loan_application = create_loan_application('_Test Company', self.applicant2, 'Demand Loan', pledge)
+		create_pledge(loan_application)
 
-		loan = create_demand_loan(self.applicant2, "Demand Loan", loan_security_pledge.name,
-			posting_date=get_first_day(nowdate()))
-
+		loan = create_demand_loan(self.applicant2, "Demand Loan", loan_application, posting_date=get_first_day(nowdate()))
 		loan.submit()
 
 		self.assertEquals(loan.loan_amount, 1000000)
@@ -259,52 +294,35 @@ class TestLoan(unittest.TestCase):
 
 		no_of_days = date_diff(last_date, first_date) + 1
 
+		no_of_days += 6
+
 		accrued_interest_amount = (loan.loan_amount * loan.rate_of_interest * no_of_days) \
-			/ (days_in_year(get_datetime().year) * 100)
+			/ (days_in_year(get_datetime(first_date).year) * 100)
 
 		make_loan_disbursement_entry(loan.name, loan.loan_amount, disbursement_date=first_date)
+		process_loan_interest_accrual_for_demand_loans(posting_date = last_date)
 
-		process_loan_interest_accrual(posting_date = add_days(first_date, 15))
-		process_loan_interest_accrual(posting_date = add_days(first_date, 30))
-
-		repayment_entry = create_repayment_entry(loan.name, self.applicant2, add_days(last_date, 1), "Regular Payment", 6500)
-		repayment_entry.save()
+		repayment_entry = create_repayment_entry(loan.name, self.applicant2, add_days(last_date, 6),
+			"Loan Closure", flt(loan.loan_amount + accrued_interest_amount))
 		repayment_entry.submit()
 
-		penalty_amount = (accrued_interest_amount * 4 * 25) / (100 * days_in_year(get_datetime(first_date).year))
+		amounts = frappe.db.get_value('Loan Interest Accrual', {'loan': loan.name}, ['paid_interest_amount',
+			'paid_principal_amount'])
 
-		lia = frappe.get_all("Loan Interest Accrual", fields=["is_paid"],
-			filters={"loan": loan.name}, order_by="posting_date")
+		loan.load_from_db()
+		self.assertEquals(loan.status, "Loan Closure Requested")
 
-		self.assertTrue(lia[0].get('is_paid'))
-		self.assertFalse(lia[1].get('is_paid'))
+		unpledge_request = create_loan_security_unpledge(loan.name, loan.applicant_type, loan.applicant, loan.company, as_dict=0)
+		unpledge_request.submit()
+		unpledge_request.status = 'Approved'
+		unpledge_request.save()
+		loan.load_from_db()
 
-	def test_security_shortfall(self):
-		pledges = []
-		pledges.append({
-			"loan_security": "Test Security 2",
-			"qty": 8000.00,
-			"haircut": 50,
-		})
+		pledged_qty = get_pledged_security_qty(loan.name)
 
-		loan_security_pledge = create_loan_security_pledge(self.applicant2, pledges)
+		self.assertEqual(loan.status, 'Closed')
+		self.assertEquals(sum(pledged_qty.values()), 0)
 
-		loan = create_loan_with_security(self.applicant2, "Stock Loan", "Repay Over Number of Periods", 12, loan_security_pledge.name)
-		loan.submit()
-
-		make_loan_disbursement_entry(loan.name, loan.loan_amount)
-
-		frappe.db.sql(""" UPDATE `tabLoan Security Price` SET loan_security_price = %s
-		where loan_security=%s""", (100, 'Test Security 2'))
-
-		check_for_ltv_shortfall()
-		loan_security_shortfall = frappe.get_doc("Loan Security Shortfall", {"loan": loan.name})
-
-		self.assertTrue(loan_security_shortfall)
-
-		self.assertEquals(loan_security_shortfall.loan_amount, 1000000.00)
-		self.assertEquals(loan_security_shortfall.security_value, 400000.00)
-		self.assertEquals(loan_security_shortfall.shortfall_amount, 600000.00)
 
 def create_loan_accounts():
 	if not frappe.db.exists("Account", "Loans and Advances (Assets) - _TC"):
@@ -399,7 +417,8 @@ def create_loan_security_type():
 			"doctype": "Loan Security Type",
 			"loan_security_type": "Stock",
 			"unit_of_measure": "Nos",
-			"haircut": 50.00
+			"haircut": 50.00,
+			"loan_to_value_ratio": 50
 		}).insert(ignore_permissions=True)
 
 def create_loan_security():
@@ -423,12 +442,13 @@ def create_loan_security():
 			"haircut": 50.00,
 		}).insert(ignore_permissions=True)
 
-def create_loan_security_pledge(applicant, pledges):
+def create_loan_security_pledge(applicant, pledges, loan_application):
 
 	lsp = frappe.new_doc("Loan Security Pledge")
 	lsp.applicant_type = 'Customer'
 	lsp.applicant = applicant
 	lsp.company = "_Test Company"
+	lsp.loan_application = loan_application
 
 	for pledge in pledges:
 		lsp.append('securities', {
@@ -487,6 +507,31 @@ def create_repayment_entry(loan, applicant, posting_date, payment_type, paid_amo
 
 	return lr
 
+def create_loan_application(company, applicant, loan_type, proposed_pledges, repayment_method=None,
+	repayment_periods=None, posting_date=None):
+	loan_application = frappe.new_doc('Loan Application')
+	loan_application.applicant_type = 'Customer'
+	loan_application.company = company
+	loan_application.applicant = applicant
+	loan_application.loan_type = loan_type
+	loan_application.posting_date = posting_date or nowdate()
+	loan_application.is_secured_loan = 1
+
+	if repayment_method:
+		loan_application.repayment_method = repayment_method
+		loan_application.repayment_periods = repayment_periods
+
+	for pledge in proposed_pledges:
+		loan_application.append('proposed_pledges', pledge)
+
+	loan_application.save()
+	loan_application.submit()
+
+	loan_application.status = 'Approved'
+	loan_application.save()
+
+	return loan_application.name
+
 
 def create_loan(applicant, loan_type, loan_amount, repayment_method, repayment_periods,
 	repayment_start_date=None, posting_date=None):
@@ -508,14 +553,13 @@ def create_loan(applicant, loan_type, loan_amount, repayment_method, repayment_p
 	loan.save()
 	return loan
 
-def create_loan_with_security(applicant, loan_type, repayment_method, repayment_periods, loan_security_pledge,
-	posting_date=None, repayment_start_date=None):
-
+def create_loan_with_security(applicant, loan_type, repayment_method, repayment_periods, loan_application, posting_date=None, repayment_start_date=None):
 	loan = frappe.get_doc({
 		"doctype": "Loan",
 		"company": "_Test Company",
 		"applicant_type": "Customer",
 		"posting_date": posting_date or nowdate(),
+		"loan_application": loan_application,
 		"applicant": applicant,
 		"loan_type": loan_type,
 		"is_term_loan": 1,
@@ -524,7 +568,6 @@ def create_loan_with_security(applicant, loan_type, repayment_method, repayment_
 		"repayment_periods": repayment_periods,
 		"repayment_start_date": repayment_start_date or nowdate(),
 		"mode_of_payment": frappe.db.get_value('Mode of Payment', {'type': 'Cash'}, 'name'),
-		"loan_security_pledge": loan_security_pledge,
 		"payment_account": 'Payment Account - _TC',
 		"loan_account": 'Loan Account - _TC',
 		"interest_income_account": 'Interest Income Account - _TC',
@@ -535,19 +578,19 @@ def create_loan_with_security(applicant, loan_type, repayment_method, repayment_
 
 	return loan
 
-def create_demand_loan(applicant, loan_type, loan_security_pledge, posting_date=None):
+def create_demand_loan(applicant, loan_type, loan_application, posting_date=None):
 
 	loan = frappe.get_doc({
 		"doctype": "Loan",
 		"company": "_Test Company",
 		"applicant_type": "Customer",
 		"posting_date": posting_date or nowdate(),
+		'loan_application': loan_application,
 		"applicant": applicant,
 		"loan_type": loan_type,
 		"is_term_loan": 0,
 		"is_secured_loan": 1,
 		"mode_of_payment": frappe.db.get_value('Mode of Payment', {'type': 'Cash'}, 'name'),
-		"loan_security_pledge": loan_security_pledge,
 		"payment_account": 'Payment Account - _TC',
 		"loan_account": 'Loan Account - _TC',
 		"interest_income_account": 'Interest Income Account - _TC',

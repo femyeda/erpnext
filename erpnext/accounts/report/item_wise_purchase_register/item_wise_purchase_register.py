@@ -14,7 +14,6 @@ def execute(filters=None):
 
 def _execute(filters=None, additional_table_columns=None, additional_query_columns=None):
 	if not filters: filters = {}
-	filters.update({"from_date": filters.get("date_range")[0], "to_date": filters.get("date_range")[1]})
 	columns = get_columns(additional_table_columns, filters)
 
 	company_currency = erpnext.get_company_currency(filters.company)
@@ -102,7 +101,7 @@ def _execute(filters=None, additional_table_columns=None, additional_query_colum
 
 		data.append(row)
 
-	if filters.get('group_by'):
+	if filters.get('group_by') and item_list:
 		total_row = total_row_map.get(prev_group_by_value or d.get('item_name'))
 		total_row['percent_gt'] = flt(total_row['total']/grand_total * 100)
 		data.append(total_row)
@@ -201,7 +200,8 @@ def get_columns(additional_table_columns, filters):
 		{
 			'label': _('Mode Of Payment'),
 			'fieldname': 'mode_of_payment',
-			'fieldtype': 'Data',
+			'fieldtype': 'Link',
+			'options': 'Mode of Payment',
 			'width': 120
 		},
 		{
@@ -265,13 +265,6 @@ def get_columns(additional_table_columns, filters):
 			'fieldtype': 'Currency',
 			'options': 'currency',
 			'width': 100
-		},
-		{
-			'fieldname': 'currency',
-			'label': _('Currency'),
-			'fieldtype': 'Currency',
-			'width': 80,
-			'hidden': 1
 		}
 	]
 
@@ -309,6 +302,8 @@ def get_items(filters, additional_query_columns):
 
 	if additional_query_columns:
 		additional_query_columns = ', ' + ', '.join(additional_query_columns)
+	else:
+		additional_query_columns = ''
 
 	return frappe.db.sql("""
 		select
@@ -320,7 +315,7 @@ def get_items(filters, additional_query_columns):
 			`tabPurchase Invoice Item`.`purchase_receipt`, `tabPurchase Invoice Item`.`po_detail`,
 			`tabPurchase Invoice Item`.`expense_account`, `tabPurchase Invoice Item`.`stock_qty`,
 			`tabPurchase Invoice Item`.`stock_uom`, `tabPurchase Invoice Item`.`base_net_amount`,
-			`tabPurchase Invoice`.supplier_name, `tabPurchase Invoice`.mode_of_payment {0}
+			`tabPurchase Invoice`.`supplier_name`, `tabPurchase Invoice`.`mode_of_payment` {0}
 		from `tabPurchase Invoice`, `tabPurchase Invoice Item`
 		where `tabPurchase Invoice`.name = `tabPurchase Invoice Item`.`parent` and
 		`tabPurchase Invoice`.docstatus = 1 %s

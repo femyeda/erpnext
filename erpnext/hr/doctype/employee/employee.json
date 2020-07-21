@@ -60,6 +60,9 @@
   "default_shift",
   "salary_information",
   "salary_mode",
+  "payroll_cost_center",
+  "column_break_52",
+  "expense_approver",
   "bank_name",
   "bank_ac_no",
   "health_insurance_section",
@@ -203,7 +206,7 @@
    "label": "Status",
    "oldfieldname": "status",
    "oldfieldtype": "Select",
-   "options": "\nActive\nLeft",
+   "options": "Active\nLeft",
    "reqd": 1,
    "search_index": 1
   },
@@ -259,7 +262,8 @@
    "bold": 1,
    "fieldname": "emergency_phone_number",
    "fieldtype": "Data",
-   "label": "Emergency Phone"
+   "label": "Emergency Phone",
+   "options": "Phone"
   },
   {
    "bold": 1,
@@ -406,6 +410,8 @@
    "options": "Branch"
   },
   {
+   "fetch_from": "grade.default_leave_policy",
+   "fetch_if_empty": 1,
    "fieldname": "leave_policy",
    "fieldtype": "Link",
    "label": "Leave Policy",
@@ -480,7 +486,8 @@
   {
    "fieldname": "cell_number",
    "fieldtype": "Data",
-   "label": "Mobile"
+   "label": "Mobile",
+   "options": "Phone"
   },
   {
    "fieldname": "prefered_contact_email",
@@ -663,6 +670,7 @@
    "oldfieldtype": "Date"
   },
   {
+   "depends_on": "eval:doc.status == \"Left\"",
    "fieldname": "relieving_date",
    "fieldtype": "Date",
    "label": "Relieving Date",
@@ -781,13 +789,31 @@
   {
    "fieldname": "column_break_19",
    "fieldtype": "Column Break"
+  },
+  {
+   "fetch_from": "department.payroll_cost_center",
+   "fetch_if_empty": 1,
+   "fieldname": "payroll_cost_center",
+   "fieldtype": "Link",
+   "label": "Payroll Cost Center",
+   "options": "Cost Center"
+  },
+  {
+   "fieldname": "column_break_52",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "expense_approver",
+   "fieldtype": "Link",
+   "label": "Expense Approver",
+   "options": "User"
   }
  ],
  "icon": "fa fa-user",
  "idx": 24,
  "image_field": "image",
  "links": [],
- "modified": "2020-01-09 04:23:55.611366",
+ "modified": "2020-07-03 21:28:04.109189",
  "modified_by": "Administrator",
  "module": "HR",
  "name": "Employee",
@@ -834,6 +860,5 @@
  "show_name_in_global_search": 1,
  "sort_field": "modified",
  "sort_order": "DESC",
- "title_field": "employee_name",
- "track_changes": 1
+ "title_field": "employee_name"
 }
